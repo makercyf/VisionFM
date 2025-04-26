@@ -97,6 +97,9 @@ def eval_linear(args):
     # fix the seed for reproducibility
     utils.fix_random_seeds(args.seed)
 
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
     # ============ preparing data ... ============
     pth_transforms.ToTensor(),
 
@@ -127,7 +130,7 @@ def eval_linear(args):
         batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
-        shuffle=True
+        shuffle=False
     )
     print(f"Data loaded with {len(dataset_val)} test imgs.")
 
