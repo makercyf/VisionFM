@@ -17,7 +17,11 @@ from torchvision import transforms as pth_transforms
 from torch.utils.data import Dataset
 from PIL import Image
 
-from sklearn.metrics import roc_auc_score, average_precision_score
+import torch.nn.functional as F
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, f1_score, average_precision_score,
+    hamming_loss, jaccard_score, recall_score, precision_score, cohen_kappa_score
+)
 from collections import defaultdict
 
 
@@ -168,15 +172,15 @@ def eval_linear(args):
     output = np.vstack(output)
     target = np.vstack(target)
 
-    auroc = roc_auc_score(target, output, average='macro', multi_class='ovr')
-    test_stats['auc'] = auroc
+    # auroc = roc_auc_score(target, output, average='macro', multi_class='ovr')
+    # test_stats['auc'] = auroc
 
 
-    target_one_hot = convert_to_one_hot(target)
-    aupr = average_precision_score(target_one_hot, output, average='macro')
-    test_stats['aupr'] = aupr
+    # target_one_hot = convert_to_one_hot(target)
+    # aupr = average_precision_score(target_one_hot, output, average='macro')
+    # test_stats['aupr'] = aupr
 
-    print(f"AUC: {auroc}, AUPR: {aupr}")
+    # print(f"AUC: {auroc}, AUPR: {aupr}")
 
     np.save(os.path.join(args.output_dir, 'best.npy'), output)
     np.save(os.path.join(args.output_dir, 'target.npy'), target)
@@ -189,7 +193,9 @@ def validate_network(val_loader, model, linear_classifier, n, avgpool):
     linear_classifier.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
-    targets, preds = [], []
+    # targets, preds = [], []
+    true_onehot, pred_onehot, true_labels, pred_labels, pred_softmax = [], [], [], [], []
+
     for inp, target in metric_logger.log_every(val_loader, 20, header):
         # move to gpu
         inp = inp.cuda(non_blocking=True)
@@ -214,22 +220,75 @@ def validate_network(val_loader, model, linear_classifier, n, avgpool):
         num_class = output.shape[1]
         if num_class > 1:  # multi-class case
             loss = nn.CrossEntropyLoss()(output, target)
+
+            output_softmax = nn.Softmax(dim=1)(output)
+            output_label = output_softmax.argmax(dim=1)
+            target_onehot = F.one_hot(target.to(torch.int64), num_classes=num_class)
+            output_onehot = F.one_hot(output_label.to(torch.int64), num_classes=num_class)
         else:
             loss = nn.BCEWithLogitsLoss()(output.squeeze(dim=1), target.float())
 
+            output_softmax = output.sigmoid()
+            output_label = (output_softmax > 0.5).float()
+            target_onehot = target.unsqueeze(1)
+            output_onehot = output_label.unsqueeze(1)
+
         # save results
-        if num_class > 1:  # multi-classes
-            preds.append(output.softmax(dim=1).detach().cpu().numpy())
-            targets.append(np.expand_dims(target.detach().cpu().numpy(), axis=1))
-        else:  # binary classification
-            preds.append(output.detach().cpu().sigmoid().numpy())
-            targets.append(np.expand_dims(target.detach().cpu().numpy(), axis=1))
+        # if num_class > 1:  # multi-classes
+        #     preds.append(output.softmax(dim=1).detach().cpu().numpy())
+        #     targets.append(np.expand_dims(target.detach().cpu().numpy(), axis=1))
+        # else:  # binary classification
+        #     preds.append(output.detach().cpu().sigmoid().numpy())
+        #     targets.append(np.expand_dims(target.detach().cpu().numpy(), axis=1))
 
         metric_logger.update(loss=loss.item())
 
+        # metrics
+        true_onehot.extend(target_onehot.cpu().numpy())
+        pred_onehot.extend(output_onehot.detach().cpu().numpy())
+        true_labels.extend(target.cpu().numpy())
+        pred_labels.extend(output_label.detach().cpu().numpy())
+        pred_softmax.extend(output_softmax.detach().cpu().numpy())
+
     print('* test loss {losses.global_avg:.4f} '.format(losses=metric_logger.loss))
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, preds, targets
+    metrics = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+    accuracy = accuracy_score(true_labels, pred_labels)
+    hamming = hamming_loss(true_onehot, pred_onehot)
+    jaccard = jaccard_score(true_onehot, pred_onehot, average='macro')
+    average_precision = average_precision_score(true_onehot, pred_softmax, average='macro')
+    kappa = cohen_kappa_score(true_labels, pred_labels)
+    f1 = f1_score(true_onehot, pred_onehot, zero_division=0, average='macro')
+    roc_auc = roc_auc_score(true_onehot, pred_softmax, multi_class='ovr', average='macro')
+    precision = precision_score(true_onehot, pred_onehot, zero_division=0, average='macro')
+    recall = recall_score(true_onehot, pred_onehot, zero_division=0, average='macro')
+    
+    score = (f1 + roc_auc + kappa) / 3
+
+    metrics.update({
+        'accuracy': accuracy,
+        'f1': f1,
+        'roc_auc': roc_auc,
+        'hamming': hamming,
+        'jaccard': jaccard,
+        'precision': precision,
+        'recall': recall,
+        'average_precision': average_precision,
+        'kappa': kappa,
+        'score': score,
+        'aupr': average_precision,  # Same as average_precision but named to match reference
+        'auc': roc_auc  # Same as roc_auc but named to match reference
+    })
+
+    print(f'* test loss {metric_logger.loss.global_avg:.4f}')
+    print(f'Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}, ROC AUC: {roc_auc:.4f}, Hamming Loss: {hamming:.4f},\n'
+          f' Jaccard Score: {jaccard:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f},\n'
+          f' Average Precision: {average_precision:.4f}, Kappa: {kappa:.4f}, Score: {score:.4f}')
+
+    return metrics, pred_softmax, true_labels
+    # return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, preds, targets
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Evaluating VisionFM for multi-class classification using a test set')
     parser.add_argument('--n_last_blocks', default=4, type=int)
