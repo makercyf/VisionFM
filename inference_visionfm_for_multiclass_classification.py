@@ -141,7 +141,7 @@ def eval_linear(args):
     model.cuda()
     print(f"Model {args.arch} {args.patch_size}x{args.patch_size} built.")
     # load visionfm pretrained weights
-    utils.load_pretrained_weights(model, args.pretrained_weights, arge.checkpoint_key, args.arch, args.patch_size)
+    utils.load_pretrained_weights(model, args.pretrained_weights, args.checkpoint_key, args.arch, args.patch_size)
 
     linear_classifier = ClsHead(embed_dim=embed_dim * 4, num_classes=args.num_labels, layers=3)
     linear_classifier = linear_classifier.cuda()
